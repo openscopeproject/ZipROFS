@@ -37,7 +37,7 @@ class LRUCache(object):
             self.log.debug('Poppping cache entry: %s', oldkey)
         self.cache[path] = zf
         return oldval
-    
+
     def get(self, path: str) -> object:
         if path in self.cache:
             self.cache.move_to_end(path)
@@ -123,7 +123,7 @@ class ZipROFS(LoggingMixIn, Operations):
             self.log.debug(info.filename)
             if '/' not in info.filename:
                 result.append(info.filename)
-        return result 
+        return result
 
 
     def release(self, path, fh):
