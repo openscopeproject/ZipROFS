@@ -8,6 +8,7 @@ from os.path import realpath
 from sys import argv, exit
 from threading import Lock
 
+import errno
 import logging
 import os
 import zipfile
@@ -17,36 +18,41 @@ from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
 from collections import OrderedDict
 
 
-class LRUCache(object):
+class CachedZipFactory(object):
     MAX_CACHE_SIZE=100
     cache = OrderedDict()
     log = logging.getLogger('ziprofs.cache')
 
-    def add(self, path: str, zf: object) -> object:
+    def _cleanup(self, zf: object):
+        zf.close()
+        del zf
+
+    def _add(self, path: str):
         if path in self.cache:
-            if self.cache[path] != zf:
-                self.log.error('Path in cache but objects don\'t match: %s', path)
-                oldval = self.cache[path]
-                self.cache[path] = zf
-                return oldval
-            else:
-                return None
-        oldval = None
+            return
         if len(self.cache) == self.MAX_CACHE_SIZE:
-            oldkey, oldval = self.cache.popitem(last=False)
-            self.log.debug('Poppping cache entry: %s', oldkey)
-        self.cache[path] = zf
-        return oldval
+            oldkey, oldvalue = self.cache.popitem(last=False)
+            self.log.debug('Popping cache entry: %s', oldkey)
+            self._cleanup(oldvalue[1])
+        mtime = os.lstat(path).st_mtime
+        self.log.debug("Caching path (%s:%s)", path, mtime)
+        self.cache[path] = (mtime, zipfile.ZipFile(path))
 
     def get(self, path: str) -> object:
         if path in self.cache:
             self.cache.move_to_end(path)
-            return self.cache[path]
-        return None
+            mtime = os.lstat(path).st_mtime
+            if mtime > self.cache[path][0]:
+                oldvalue = self.cache.pop(path)
+                self._cleanup(oldvalue[1])
+                self._add(path)
+        else:
+            self._add(path)
+        return self.cache[path][1]
 
 
 class ZipROFS(LoggingMixIn, Operations):
-    zip_cache = LRUCache()
+    zip_factory = CachedZipFactory()
 
     def __init__(self, root):
         self.root = realpath(root)
@@ -56,7 +62,7 @@ class ZipROFS(LoggingMixIn, Operations):
         return super(ZipROFS, self).__call__(op, self.root + path, *args)
 
     @staticmethod
-    def get_zip_path(path: str)-> str:
+    def get_zip_path(path: str) -> str:
         parts = []
         head, tail = os.path.split(path)
         while tail:
@@ -64,7 +70,7 @@ class ZipROFS(LoggingMixIn, Operations):
             head, tail = os.path.split(head)
         parts.reverse()
         cur_path = '/'
-        for i, part in enumerate(parts):
+        for part in parts:
             cur_path = os.path.join(cur_path, part)
             if zipfile.is_zipfile(cur_path):
                 return cur_path
@@ -81,18 +87,25 @@ class ZipROFS(LoggingMixIn, Operations):
         result = {key: getattr(st, key) for key in ('st_atime', 'st_ctime',
             'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid')}
         if zip_path == path:
-            result['st_mode'] = S_IFDIR | (result['st_mode'] & 0o777)
+            result['st_mode'] = S_IFDIR | (result['st_mode'] & 0o555)
         elif zip_path:
-            zf = self.zip_cache.get(zip_path)
-            if not zf:
-                zf = zipfile.ZipFile(zip_path)
-                oldzf = self.zip_cache.add(zip_path, zf)
-                if oldzf:
-                    oldzf.close()
-                    del oldzf
-            info = zf.getinfo(path[len(zip_path)+1:])
-            result['st_size'] = info.file_size
-            result['st_mode'] = stat.S_IFREG | 0o555
+            zf = self.zip_factory.get(zip_path)
+            subpath = path[len(zip_path)+1:]
+            try:
+                info = zf.getinfo(subpath)
+                result['st_size'] = info.file_size
+                result['st_mode'] = stat.S_IFREG | 0o555
+            except KeyError:
+                # check if it is a valid subdirectory
+                infolist = zf.infolist()
+                found = False
+                for info in infolist:
+                    if info.filename.find(subpath + '/') == 0:
+                        found = True
+                if found:
+                    result['st_mode'] = S_IFDIR | 0o555
+                else:
+                    raise FuseOSError(errno.ENOENT)
         return result
 
     getxattr = None
@@ -110,19 +123,25 @@ class ZipROFS(LoggingMixIn, Operations):
         zip_path = self.get_zip_path(path)
         if not zip_path:
             return ['.', '..'] + os.listdir(path)
-        zf = self.zip_cache.get(zip_path)
-        if not zf:
-            zf = zipfile.ZipFile(zip_path)
-            oldzf = self.zip_cache.add(zip_path, zf)
-            if oldzf:
-                oldzf.close()
-                del oldzf
+        subpath = path[len(zip_path)+1:]
+        zf = self.zip_factory.get(zip_path)
         infolist = zf.infolist()
+
         result = ['.', '..']
+        subdirs = set()
         for info in infolist:
             self.log.debug(info.filename)
-            if '/' not in info.filename:
-                result.append(info.filename)
+            if info.filename.find(subpath) == 0 and info.filename > subpath:
+                suffix = info.filename[len(subpath)+1 if subpath else 0:]
+                if not suffix:
+                    continue
+                if '/' not in suffix:
+                    result.append(suffix)
+                    self.log.debug("adding %s", suffix)
+                else:
+                    subdirs.add(suffix[:suffix.find('/')])
+                    self.log.debug("adding %s", suffix[:suffix.find('/')])
+        result.extend(subdirs)
         return result
 
 

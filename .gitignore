@@ -1,2 +1,4 @@
 .vscode/settings.json
 test/test.log
+test/mnt/*
+objectdb

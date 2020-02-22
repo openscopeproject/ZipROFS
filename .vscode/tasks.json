@@ -15,6 +15,15 @@
                 "kind": "build",
                 "isDefault": true
             }
+        },
+        {
+            "label": "run ziprofs",
+            "type": "shell",
+            "command": "${workspaceFolder}/ziprofs.py",
+            "args": [
+                "${workspaceFolder}/test/data",
+                "${workspaceFolder}/test/mnt",
+            ],
         }
     ]
 }

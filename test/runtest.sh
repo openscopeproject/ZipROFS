@@ -10,7 +10,7 @@ function runtest {
     TESTCOMMAND="$3"
     echo "--------------------------"
     echo "Running test: $TESTDESCR"
-    RESULT=$($TESTCOMMAND)
+    RESULT=$(bash -c "$TESTCOMMAND")
     if [[ "$EXPECTED" != "$RESULT" ]]; then
         echo "FAIL"
         echo -e "Expected:\n$EXPECTED"
@@ -38,11 +38,12 @@ cd "$REPODIR/test/mnt"
 
 runtest "zip is directory" "./test.zip" 'find ./ -type d -name test.zip'
 
-TREERESULT=$(tree -a ../data | tail -n +2 | grep -v test.zip)
-#runtest "tree" "$TREERESULT" 'tree -a ./test.zip | tail -n +2'
+TREERESULT=$(tree -a --noreport ../data | tail -n +2 | grep -v test.zip)
+runtest "tree" "$TREERESULT" 'tree -a --noreport ./test.zip | tail -n +2'
 
 cd ..
 echo "Killing ziprofs"
+fusermount -u "$REPODIR/test/mnt"
 kill $PID
 
 echo "$PASSEDTESTS/$TOTALTESTS tests passed."
