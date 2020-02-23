@@ -31,7 +31,7 @@ echo "Mounting filesystem"
 if [ ! -z "$(mount | grep "$REPODIR/test/mnt")" ]; then
     fusermount -u "$REPODIR/test/mnt"
 fi
-"$REPODIR/ziprofs.py" "$REPODIR/test/data" "$REPODIR/test/mnt" > "$REPODIR/test/test.log" 2>&1 &
+"$REPODIR/ziprofs.py" "$REPODIR/test/data" "$REPODIR/test/mnt" -o foreground,debug > "$REPODIR/test/test.log" 2>&1 &
 PID=$!
 sleep 1
 cd "$REPODIR/test/mnt"

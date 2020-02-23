@@ -23,6 +23,8 @@
             "args": [
                 "${workspaceFolder}/test/data",
                 "${workspaceFolder}/test/mnt",
+                "-o",
+                "foreground,debug"
             ],
         }
     ]

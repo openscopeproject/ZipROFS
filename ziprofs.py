@@ -7,6 +7,7 @@ from os.path import realpath
 from sys import argv, exit
 from threading import Lock
 
+import argparse
 import errno
 import logging
 import os
@@ -18,7 +19,7 @@ from collections import OrderedDict
 
 
 class CachedZipFactory(object):
-    MAX_CACHE_SIZE=100
+    MAX_CACHE_SIZE=1000
     cache = OrderedDict()
     log = logging.getLogger('ziprofs.cache')
 
@@ -166,9 +167,22 @@ class ZipROFS(LoggingMixIn, Operations):
 
 
 if __name__ == '__main__':
-    if len(argv) != 3:
-        print('usage: %s <root> <mountpoint>' % argv[0])
-        exit(1)
-    logging.basicConfig(level=logging.INFO)
+    parser = argparse.ArgumentParser(
+        description='ZipROFS read only transparent zip filesystem.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('ROOT', nargs='?', help="filesystem root")
+    parser.add_argument('MOUNTPOINT', nargs='?', help="filesystem mount point")
+    parser.add_argument(
+        '-o', metavar='options', dest='opts',
+        help="comma separated list of options: foreground, debug, allowother")
+    args = parser.parse_args()
+    opts = args.opts.split(',') if args.opts else []
+    print(opts)
 
-    fuse = FUSE(ZipROFS(argv[1]), argv[2], foreground=False)
+    logging.basicConfig(level=logging.DEBUG if 'debug' in opts else logging.INFO)
+
+    fuse = FUSE(
+        ZipROFS(args.ROOT),
+        args.MOUNTPOINT,
+        foreground=('foreground' in opts),
+        allow_other=('allowother' in opts))
