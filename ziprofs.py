@@ -127,8 +127,8 @@ class ZipROFS(LoggingMixIn, Operations):
             zf = self.zip_factory.get(zip_path)
             subpath = path[len(zip_path)+1:]
             with zf.open(subpath) as f:
-                f.seek(offset)
-                return f.read(size)
+                content = f.read(offset + size)
+                return content[offset:]
 
     def readdir(self, path, fh):
         zip_path = self.get_zip_path(path)

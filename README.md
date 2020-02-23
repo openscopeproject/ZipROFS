@@ -1,4 +1,5 @@
 # ZipROFS
+[![Build Status](https://travis-ci.com/openscopeproject/ZipROFS.svg?branch=dev)](https://travis-ci.com/openscopeproject/ZipROFS)
 
 This is a FUSE filesystem that acts as pass through to another FS except it
 expands zip files like folders and allows direct transparent access to the contents.

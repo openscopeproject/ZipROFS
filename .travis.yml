@@ -1,0 +1,11 @@
+dist: bionic
+
+addons:
+  apt:
+    packages:
+      - fuse
+      - python3-fusepy
+      - tree
+
+script:
+    - "$TRAVIS_BUILD_DIR/test/runtest.sh -log"

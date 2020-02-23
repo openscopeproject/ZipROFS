@@ -2,6 +2,7 @@
 
 TOTALTESTS=0
 PASSEDTESTS=0
+PASTELOG=$1
 
 function runtest {
     ((TOTALTESTS+=1))
@@ -28,6 +29,9 @@ function runtest {
 echo "Running ziprofs tests..."
 REPODIR="$(dirname $(dirname $(readlink -f "$0")))"
 echo "Mounting filesystem"
+if [ ! -d "$REPODIR/test/mnt" ]; then
+  mkdir -p "$REPODIR/test/mnt"
+fi
 if [ ! -z "$(mount | grep "$REPODIR/test/mnt")" ]; then
     fusermount -u "$REPODIR/test/mnt"
 fi
@@ -52,4 +56,12 @@ fusermount -u "$REPODIR/test/mnt"
 kill $PID
 
 echo "$PASSEDTESTS/$TOTALTESTS tests passed."
-exit $([[ $PASSEDTESTS != $TOTALTESTS ]])
+if [[ "$PASTELOG" == "-log" ]]; then
+  echo "Copying test log in full:"
+  echo
+  cat "$REPODIR/test/test.log"
+fi
+
+if [[ $PASSEDTESTS != $TOTALTESTS ]]; then
+  exit 1
+fi
