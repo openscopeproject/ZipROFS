@@ -41,6 +41,11 @@ runtest "zip is directory" "./test.zip" 'find ./ -type d -name test.zip'
 TREERESULT=$(tree -a --noreport ../data | tail -n +2 | grep -v test.zip)
 runtest "tree" "$TREERESULT" 'tree -a --noreport ./test.zip | tail -n +2'
 
+runtest "reading file content #1" "$(cat ../data/text.txt)" 'cat test.zip/text.txt'
+runtest "reading file content #2" "$(cat ../data/folder/subfolder/file.txt)" 'cat test.zip/folder/subfolder/file.txt'
+
+runtest "running script" "hello" 'test.zip/script.sh'
+
 cd ..
 echo "Killing ziprofs"
 fusermount -u "$REPODIR/test/mnt"

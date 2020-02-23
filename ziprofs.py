@@ -3,7 +3,6 @@ from __future__ import print_function, absolute_import, division
 
 import logging
 
-from errno import EACCES
 from os.path import realpath
 from sys import argv, exit
 from threading import Lock
@@ -77,12 +76,15 @@ class ZipROFS(LoggingMixIn, Operations):
         return None
 
     def access(self, path, mode):
-        if not os.access(path, mode):
-            raise FuseOSError(EACCES)
+        zip_path = self.get_zip_path(path)
+        if not zip_path:
+            if not os.access(path, mode):
+                raise FuseOSError(errno.EACCES)
+        if mode == os.W_OK:
+            raise FuseOSError(errno.EACCES)
 
     def getattr(self, path, fh=None):
         zip_path = self.get_zip_path(path)
-        self.log.debug('zip path: %s', zip_path)
         st = os.lstat(zip_path) if zip_path else os.lstat(path)
         result = {key: getattr(st, key) for key in ('st_atime', 'st_ctime',
             'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid')}
@@ -102,22 +104,30 @@ class ZipROFS(LoggingMixIn, Operations):
                 for info in infolist:
                     if info.filename.find(subpath + '/') == 0:
                         found = True
+                        break
                 if found:
                     result['st_mode'] = S_IFDIR | 0o555
                 else:
                     raise FuseOSError(errno.ENOENT)
         return result
 
-    getxattr = None
-
-    listxattr = None
-
-    open = os.open
+    def open(self, path, flags):
+        zip_path = self.get_zip_path(path)
+        if not zip_path:
+            return os.open(path, flags)
+        return 0
 
     def read(self, path, size, offset, fh):
         with self.rwlock:
-            os.lseek(fh, offset, 0)
-            return os.read(fh, size)
+            zip_path = self.get_zip_path(path)
+            if not zip_path:
+                os.lseek(fh, offset, 0)
+                return os.read(fh, size)
+            zf = self.zip_factory.get(zip_path)
+            subpath = path[len(zip_path)+1:]
+            with zf.open(subpath) as f:
+                f.seek(offset)
+                return f.read(size)
 
     def readdir(self, path, fh):
         zip_path = self.get_zip_path(path)
@@ -130,23 +140,23 @@ class ZipROFS(LoggingMixIn, Operations):
         result = ['.', '..']
         subdirs = set()
         for info in infolist:
-            self.log.debug(info.filename)
             if info.filename.find(subpath) == 0 and info.filename > subpath:
                 suffix = info.filename[len(subpath)+1 if subpath else 0:]
                 if not suffix:
                     continue
                 if '/' not in suffix:
                     result.append(suffix)
-                    self.log.debug("adding %s", suffix)
                 else:
                     subdirs.add(suffix[:suffix.find('/')])
-                    self.log.debug("adding %s", suffix[:suffix.find('/')])
         result.extend(subdirs)
         return result
 
 
     def release(self, path, fh):
-        return os.close(fh)
+        zip_path = self.get_zip_path(path)
+        if not zip_path:
+            return os.close(fh)
+        return 0
 
     def statfs(self, path):
         stv = os.statvfs(path)
@@ -154,13 +164,11 @@ class ZipROFS(LoggingMixIn, Operations):
             'f_blocks', 'f_bsize', 'f_favail', 'f_ffree', 'f_files', 'f_flag',
             'f_frsize', 'f_namemax'))
 
-    utimens = os.utime
-
 
 if __name__ == '__main__':
     if len(argv) != 3:
         print('usage: %s <root> <mountpoint>' % argv[0])
         exit(1)
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
-    fuse = FUSE(ZipROFS(argv[1]), argv[2], foreground=True)
+    fuse = FUSE(ZipROFS(argv[1]), argv[2], foreground=False)
