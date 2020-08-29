@@ -11,8 +11,7 @@ import logging
 import os
 import zipfile
 import stat
-from threading import Lock
-from typing import Optional
+from typing import Optional, Dict
 
 try:
     from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
@@ -64,8 +63,7 @@ class ZipROFS(LoggingMixIn, Operations):
     def __init__(self, root):
         self.root = realpath(root)
         # odd file handles are files inside zip, even fhs are system-wide files - collision avoidance
-        self._zip_file_fh = {}
-        self._zip_lock_fh = {}
+        self._zip_file_fh: Dict[int, zipfile.ZipExtFile] = {}
 
     def __call__(self, op, path, *args):
         return super(ZipROFS, self).__call__(op, self.root + path, *args)
@@ -73,7 +71,7 @@ class ZipROFS(LoggingMixIn, Operations):
     def _get_free_zip_fh(self):
         i = 5   # avoid confusion with stdin/err/out
         while True:
-            if i not in self._zip_file_fh and i not in self._zip_lock_fh:
+            if i not in self._zip_file_fh:
                 return i
             i += 2
 
@@ -135,7 +133,6 @@ class ZipROFS(LoggingMixIn, Operations):
             fh = self._get_free_zip_fh()
             zf = self.zip_factory.get(zip_path)
             self._zip_file_fh[fh] = zf.open(path[len(zip_path) + 1:])
-            self._zip_lock_fh[fh] = Lock()
             return fh
         else:
             return os.open(path, flags) << 1
@@ -143,10 +140,12 @@ class ZipROFS(LoggingMixIn, Operations):
     def read(self, path, size, offset, fh):
         if self.get_zip_path(path):
             f = self._zip_file_fh[fh]  # should be here (file is first opened, then read)
-            with self._zip_lock_fh[fh]:
+            # ZipExtFile._fileobj is always _SharedFile, which has common lock with ZipFile instance
+            with self._zip_file_fh[fh]._fileobj._lock:
                 if f.seekable():
-                    foffset = f.tell()
-                    self.log.debug(f" file offset: {foffset}, read offset: {offset}, diff: {offset-foffset}")
+                    if self.log.isEnabledFor(logging.DEBUG):
+                        foffset = f.tell()
+                        self.log.debug(f" file offset: {foffset}, read offset: {offset}, diff: {offset-foffset}")
                     f.seek(offset)
                     return f.read(size)
                 else:
@@ -186,11 +185,9 @@ class ZipROFS(LoggingMixIn, Operations):
     def release(self, path, fh):
         if self.get_zip_path(path):
             f = self._zip_file_fh[fh]
-            with self._zip_lock_fh[fh]:
-                ret = f.close()
+            with self._zip_file_fh[fh]._fileobj._lock:
                 del self._zip_file_fh[fh]
-                del self._zip_lock_fh[fh]
-                return ret
+                return f.close()
         else:
             return os.close(fh >> 1)
 
