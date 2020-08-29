@@ -11,6 +11,7 @@ import logging
 import os
 import zipfile
 import stat
+from threading import Lock
 from typing import Optional
 
 try:
@@ -62,7 +63,9 @@ class ZipROFS(LoggingMixIn, Operations):
 
     def __init__(self, root):
         self.root = realpath(root)
-        self._zip_fh = {}  # odd file handles are files inside zip, even fhs are system-wide files - collision avoidance
+        # odd file handles are files inside zip, even fhs are system-wide files - collision avoidance
+        self._zip_file_fh = {}
+        self._zip_lock_fh = {}
 
     def __call__(self, op, path, *args):
         return super(ZipROFS, self).__call__(op, self.root + path, *args)
@@ -70,7 +73,7 @@ class ZipROFS(LoggingMixIn, Operations):
     def _get_free_zip_fh(self):
         i = 5   # avoid confusion with stdin/err/out
         while True:
-            if i not in self._zip_fh:
+            if i not in self._zip_file_fh and i not in self._zip_lock_fh:
                 return i
             i += 2
 
@@ -131,26 +134,30 @@ class ZipROFS(LoggingMixIn, Operations):
         if zip_path := self.get_zip_path(path):
             fh = self._get_free_zip_fh()
             zf = self.zip_factory.get(zip_path)
-            self._zip_fh[fh] = zf.open(path[len(zip_path) + 1:])
+            self._zip_file_fh[fh] = zf.open(path[len(zip_path) + 1:])
+            self._zip_lock_fh[fh] = Lock()
             return fh
         else:
             return os.open(path, flags) << 1
 
     def read(self, path, size, offset, fh):
         if self.get_zip_path(path):
-            f = self._zip_fh[fh]  # should be here (file is first opened, then read)
-            if f.seekable():
-                f.seek(offset)
-                return f.read(size)
-            else:
-                # emulate seek by reading and discarding chunks
-                filepos = f._orig_file_size - f._left - len(f._readbuffer) + f._offset      # zipfile.py#1110 - tell()
-                offset -= filepos
-                if offset < 0:
-                    raise FuseOSError(errno.ENOTSUP)
-                while offset > 0:
-                    offset -= len(f.read(min(self.MAX_SEEK_READ, offset)))
-                return f.read(size)
+            f = self._zip_file_fh[fh]  # should be here (file is first opened, then read)
+            with self._zip_lock_fh[fh]:
+                if f.seekable():
+                    foffset = f.tell()
+                    self.log.debug(f" file offset: {foffset}, read offset: {offset}, diff: {offset-foffset}")
+                    f.seek(offset)
+                    return f.read(size)
+                else:
+                    # emulate seek by reading and discarding chunks
+                    filepos = f._orig_file_size - f._left - len(f._readbuffer) + f._offset      # zipfile.py#1110 - tell()
+                    offset -= filepos
+                    if offset < 0:
+                        raise FuseOSError(errno.ENOTSUP)
+                    while offset > 0:
+                        offset -= len(f.read(min(self.MAX_SEEK_READ, offset)))
+                    return f.read(size)
         else:
             os.lseek(fh >> 1, offset, 0)
             return os.read(fh >> 1, size)
@@ -178,9 +185,12 @@ class ZipROFS(LoggingMixIn, Operations):
 
     def release(self, path, fh):
         if self.get_zip_path(path):
-            f = self._zip_fh[fh]
-            del self._zip_fh[fh]
-            return f.close()
+            f = self._zip_file_fh[fh]
+            with self._zip_lock_fh[fh]:
+                ret = f.close()
+                del self._zip_file_fh[fh]
+                del self._zip_lock_fh[fh]
+                return ret
         else:
             return os.close(fh >> 1)
 
