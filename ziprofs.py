@@ -13,7 +13,12 @@ import zipfile
 import stat
 from typing import Optional
 
-from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+try:
+    from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+except ImportError:
+    # ubuntu renamed package in repository
+    from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+
 from collections import OrderedDict
 
 
