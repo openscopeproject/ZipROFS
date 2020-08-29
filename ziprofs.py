@@ -120,7 +120,7 @@ class ZipROFS(LoggingMixIn, Operations):
         cur_path = '/'
         for part in parts:
             cur_path = os.path.join(cur_path, part)
-            if zipfile.is_zipfile(cur_path):
+            if part[-4:] == '.zip' and zipfile.is_zipfile(cur_path):
                 return cur_path
         return None
 
