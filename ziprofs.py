@@ -90,11 +90,12 @@ class ZipROFS(LoggingMixIn, Operations):
         return None
 
     def access(self, path, mode):
-        if not self.get_zip_path(path):
+        if self.get_zip_path(path):
+            if mode & os.W_OK:
+                raise FuseOSError(errno.EROFS)
+        else:
             if not os.access(path, mode):
                 raise FuseOSError(errno.EACCES)
-        if mode == os.W_OK:
-            raise FuseOSError(errno.EACCES)
 
     def getattr(self, path, fh=None):
         zip_path = self.get_zip_path(path)
@@ -102,6 +103,7 @@ class ZipROFS(LoggingMixIn, Operations):
         result = {key: getattr(st, key) for key in (
             'st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'
         )}
+        # TODO: read file creation time from zip
         if zip_path == path:
             result['st_mode'] = S_IFDIR | (result['st_mode'] & 0o555)
         elif zip_path:
@@ -141,11 +143,13 @@ class ZipROFS(LoggingMixIn, Operations):
                 f.seek(offset)
                 return f.read(size)
             else:
-                # emulate seek by reading and skipping 1mb chunks
+                # emulate seek by reading and discarding chunks
+                filepos = f._orig_file_size - f._left - len(f._readbuffer) + f._offset      # zipfile.py#1110 - tell()
+                offset -= filepos
+                if offset < 0:
+                    raise FuseOSError(errno.ENOTSUP)
                 while offset > 0:
-                    read_len = min(self.MAX_SEEK_READ, offset)
-                    f.read(read_len)
-                    offset -= read_len
+                    offset -= len(f.read(min(self.MAX_SEEK_READ, offset)))
                 return f.read(size)
         else:
             os.lseek(fh >> 1, offset, 0)
