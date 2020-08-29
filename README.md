@@ -25,16 +25,18 @@ $ fusermount -u ~/mount
 Full help:
 ```shell
 $ ./ziprofs.py -h
-usage: ziprofs.py [-h] [-o options] [ROOT] [MOUNTPOINT]
+usage: ziprofs.py [-h] [-o options] [--cachesize CACHESIZE] [root] [mountpoint]
 
 ZipROFS read only transparent zip filesystem.
 
 positional arguments:
-  ROOT        filesystem root (default: None)
-  MOUNTPOINT  filesystem mount point (default: None)
+  root                  filesystem root (default: None)
+  mountpoint            filesystem mount point (default: None)
 
 optional arguments:
-  -h, --help  show this help message and exit
-  -o options  comma separated list of options: foreground, debug, allowother
-              (default: None)
+  -h, --help            show this help message and exit
+  -o options            comma separated list of options: foreground, debug, allowother (default: None)
+  --cachesize CACHESIZE
+                        zip files cache size (default: 1000)
+
 ```
