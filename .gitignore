@@ -2,3 +2,6 @@
 test/test.log
 test/mnt/*
 objectdb
+venv/
+.idea/
+log.txt

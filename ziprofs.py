@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import print_function, absolute_import, division
 
-import logging
+from functools import lru_cache
 
 from os.path import realpath
-from sys import argv, exit
-from threading import Lock
 
 import argparse
 import errno
@@ -13,104 +11,88 @@ import logging
 import os
 import zipfile
 import stat
+from threading import RLock
+from typing import Optional, Dict
 
-from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+try:
+    from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+except ImportError:
+    # ubuntu renamed package in repository
+    from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+
 from collections import OrderedDict
 
 
-class CachedZipFile(object):
-    MAX_SEEK_READ = 1 << 24
+@lru_cache(maxsize=2048)
+def is_zipfile(path, mtime):
+    # mtime just to miss cache on changed files
+    return zipfile.is_zipfile(path)
 
-    def __init__(self, path):
-        self.cache = {}
-        self.zf = zipfile.ZipFile(path)
 
-    def read(self, subpath, size, offset):
-        if subpath not in self.cache:
-            self.cache[subpath] = (0, self.zf.open(subpath))
-        pos, f = self.cache[subpath]
-        if f.seekable():
-            pos = f.seek(offset)
-            buf = f.read(size)
-        else:
-            if offset < pos:
-                pos = 0
-                f.close()
-                f = self.zf.open(subpath)
-            else:
-                offset -= pos
-            while offset > 0:
-                read_len = min(self.MAX_SEEK_READ, offset)
-                buf = f.read(read_len)
-                pos += len(buf)
-                offset -= read_len
-            buf = f.read(size)
+class ZipFile(zipfile.ZipFile):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.__lock = RLock()
 
-        pos += len(buf)
-        self.cache[subpath] = (pos, f)
-        return buf
-
-    def close(self):
-        for k, v in self.cache.items():
-            v[1].close()
-        self.zf.close()
-
-    # pass through methods
-    def getinfo(self, subpath):
-        return self.zf.getinfo(subpath)
-
-    def infolist(self):
-        return self.zf.infolist()
+    def lock(self):
+        return self.__lock
 
 
 class CachedZipFactory(object):
-    MAX_CACHE_SIZE=1000
+    MAX_CACHE_SIZE = 1000
     cache = OrderedDict()
     log = logging.getLogger('ziprofs.cache')
-    rwlock = Lock()
 
-    def _cleanup(self, zf: CachedZipFile):
-        zf.close()
-        del zf
+    def __init__(self):
+        self.__lock = RLock()
 
     def _add(self, path: str):
         if path in self.cache:
             return
-        with self.rwlock:
-            if len(self.cache) == self.MAX_CACHE_SIZE:
-                oldkey, oldvalue = self.cache.popitem(last=False)
-                self.log.debug('Popping cache entry: %s', oldkey)
-                self._cleanup(oldvalue[1])
-            mtime = os.lstat(path).st_mtime
-            self.log.debug("Caching path (%s:%s)", path, mtime)
-            self.cache[path] = (mtime, CachedZipFile(path))
+        while len(self.cache) >= self.MAX_CACHE_SIZE:
+            path, val = self.cache.popitem(last=False)
+            self.log.debug('Popping cache entry: %s', path)
+            val[1].close()
+        mtime = os.lstat(path).st_mtime
+        self.log.debug("Caching path (%s:%s)", path, mtime)
+        self.cache[path] = (mtime, ZipFile(path))
 
-    def get(self, path: str) -> object:
-        if path in self.cache:
-            self.cache.move_to_end(path)
-            mtime = os.lstat(path).st_mtime
-            if mtime > self.cache[path][0]:
-                with self.rwlock:
-                    oldvalue = self.cache.pop(path)
-                self._cleanup(oldvalue[1])
+    def get(self, path: str) -> ZipFile:
+        with self.__lock:
+            if path in self.cache:
+                self.cache.move_to_end(path)
+                mtime = os.lstat(path).st_mtime
+                if mtime > self.cache[path][0]:
+                    val = self.cache.pop(path)
+                    val[1].close()
+                    self._add(path)
+            else:
                 self._add(path)
-        else:
-            self._add(path)
-        return self.cache[path][1]
+            return self.cache[path][1]
 
 
 class ZipROFS(LoggingMixIn, Operations):
+    MAX_SEEK_READ = 1 << 24
     zip_factory = CachedZipFactory()
 
     def __init__(self, root):
         self.root = realpath(root)
-        self.rwlock = Lock()
+        # odd file handles are files inside zip, even fhs are system-wide files
+        self._zip_file_fh: Dict[int, zipfile.ZipExtFile] = {}
+        self._zip_zfile_fh: Dict[int, ZipFile] = {}
+        self._lock = RLock()
 
     def __call__(self, op, path, *args):
         return super(ZipROFS, self).__call__(op, self.root + path, *args)
 
+    def _get_free_zip_fh(self):
+        i = 5   # avoid confusion with stdin/err/out
+        while i in self._zip_file_fh:
+            i += 2
+        return i
+
     @staticmethod
-    def get_zip_path(path: str) -> str:
+    def get_zip_path(path: str) -> Optional[str]:
         parts = []
         head, tail = os.path.split(path)
         while tail:
@@ -120,23 +102,25 @@ class ZipROFS(LoggingMixIn, Operations):
         cur_path = '/'
         for part in parts:
             cur_path = os.path.join(cur_path, part)
-            if part[-4:] == '.zip' and zipfile.is_zipfile(cur_path):
+            if part[-4:] == '.zip' and is_zipfile(cur_path, os.lstat(cur_path).st_mtime):
                 return cur_path
         return None
 
     def access(self, path, mode):
-        zip_path = self.get_zip_path(path)
-        if not zip_path:
+        if self.get_zip_path(path):
+            if mode & os.W_OK:
+                raise FuseOSError(errno.EROFS)
+        else:
             if not os.access(path, mode):
                 raise FuseOSError(errno.EACCES)
-        if mode == os.W_OK:
-            raise FuseOSError(errno.EACCES)
 
     def getattr(self, path, fh=None):
         zip_path = self.get_zip_path(path)
         st = os.lstat(zip_path) if zip_path else os.lstat(path)
-        result = {key: getattr(st, key) for key in ('st_atime', 'st_ctime',
-            'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid')}
+        result = {key: getattr(st, key) for key in (
+            'st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'
+        )}
+        # TODO: read file creation time from zip
         if zip_path == path:
             result['st_mode'] = S_IFDIR | (result['st_mode'] & 0o555)
         elif zip_path:
@@ -162,19 +146,28 @@ class ZipROFS(LoggingMixIn, Operations):
 
     def open(self, path, flags):
         zip_path = self.get_zip_path(path)
-        if not zip_path:
-            return os.open(path, flags)
-        return 0
+        if zip_path:
+            with self._lock:
+                fh = self._get_free_zip_fh()
+                zf = self.zip_factory.get(zip_path)
+                self._zip_zfile_fh[fh] = zf
+                self._zip_file_fh[fh] = zf.open(path[len(zip_path) + 1:])
+                return fh
+        else:
+            return os.open(path, flags) << 1
 
     def read(self, path, size, offset, fh):
-        with self.rwlock:
-            zip_path = self.get_zip_path(path)
-            if not zip_path:
-                os.lseek(fh, offset, 0)
-                return os.read(fh, size)
-            zf = self.zip_factory.get(zip_path)
-            subpath = path[len(zip_path)+1:]
-            return zf.read(subpath, size, offset)
+        if fh in self._zip_file_fh:
+            f = self._zip_file_fh[fh]  # should be here (file is first opened, then read)
+            with self._zip_zfile_fh[fh].lock():
+                if not f.seekable():
+                    raise FuseOSError(errno.EBADF)
+
+                f.seek(offset)
+                return f.read(size)
+        else:
+            os.lseek(fh >> 1, offset, 0)
+            return os.read(fh >> 1, size)
 
     def readdir(self, path, fh):
         zip_path = self.get_zip_path(path)
@@ -198,37 +191,59 @@ class ZipROFS(LoggingMixIn, Operations):
         result.extend(subdirs)
         return result
 
-
     def release(self, path, fh):
-        zip_path = self.get_zip_path(path)
-        if not zip_path:
-            return os.close(fh)
-        return 0
+        if fh in self._zip_file_fh:
+            with self._lock:
+                f = self._zip_file_fh[fh]
+                with self._zip_zfile_fh[fh].lock():
+                    del self._zip_file_fh[fh]
+                    del self._zip_zfile_fh[fh]
+                    return f.close()
+        else:
+            return os.close(fh >> 1)
 
     def statfs(self, path):
         stv = os.statvfs(path)
-        return dict((key, getattr(stv, key)) for key in ('f_bavail', 'f_bfree',
-            'f_blocks', 'f_bsize', 'f_favail', 'f_ffree', 'f_files', 'f_flag',
-            'f_frsize', 'f_namemax'))
+        return dict((key, getattr(stv, key)) for key in (
+            'f_bavail', 'f_bfree', 'f_blocks', 'f_bsize', 'f_favail',
+            'f_ffree', 'f_files', 'f_flag', 'f_frsize', 'f_namemax'
+        ))
+
+
+def parse_mount_opts(in_str):
+    opts = {}
+    for o in in_str.split(','):
+        if '=' in o:
+            name, val = o.split('=', 1)
+            opts[name] = val
+        else:
+            opts[o] = True
+    return opts
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='ZipROFS read only transparent zip filesystem.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('ROOT', nargs='?', help="filesystem root")
-    parser.add_argument('MOUNTPOINT', nargs='?', help="filesystem mount point")
+    parser.add_argument('root', nargs='?', help="filesystem root")
+    parser.add_argument('mountpoint', nargs='?', help="filesystem mount point")
     parser.add_argument(
         '-o', metavar='options', dest='opts',
-        help="comma separated list of options: foreground, debug, allowother")
-    args = parser.parse_args()
-    opts = args.opts.split(',') if args.opts else []
-    print(opts)
+        help="comma separated list of options: foreground, debug, allowother, cachesize=N",
+        type=parse_mount_opts, default={})
+    arg = parser.parse_args()
 
-    logging.basicConfig(level=logging.DEBUG if 'debug' in opts else logging.INFO)
+    if 'cachesize' in arg.opts:
+        cache_size = int(arg.opts['cachesize'])
+        if cache_size < 1:
+            raise ValueError("Bad cache size")
+        CachedZipFactory.MAX_CACHE_SIZE = cache_size
+
+    logging.basicConfig(level=logging.DEBUG if 'debug' in arg.opts else logging.INFO)
 
     fuse = FUSE(
-        ZipROFS(args.ROOT),
-        args.MOUNTPOINT,
-        foreground=('foreground' in opts),
-        allow_other=('allowother' in opts))
+        ZipROFS(arg.root),
+        arg.mountpoint,
+        foreground=('foreground' in arg.opts),
+        allow_other=('allowother' in arg.opts)
+    )
