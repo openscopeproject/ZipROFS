@@ -52,6 +52,7 @@ class CachedZipFactory(object):
 
 
 class ZipROFS(LoggingMixIn, Operations):
+    MAX_SEEK_READ = 1 << 24
     zip_factory = CachedZipFactory()
 
     def __init__(self, root):
@@ -127,8 +128,16 @@ class ZipROFS(LoggingMixIn, Operations):
             zf = self.zip_factory.get(zip_path)
             subpath = path[len(zip_path)+1:]
             with zf.open(subpath) as f:
-                content = f.read(offset + size)
-                return content[offset:]
+                if f.seekable():
+                    f.seek(offset)
+                    return f.read(size)
+                else:
+                    # emulate seek by reading and skipping 1mb chunks
+                    while offset > 0:
+                        read_len = min(self.MAX_SEEK_READ, offset)
+                        f.read(read_len)
+                        offset -= read_len
+                    return f.read(size)
 
     def readdir(self, path, fh):
         zip_path = self.get_zip_path(path)
