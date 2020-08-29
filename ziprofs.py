@@ -197,7 +197,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '-o', metavar='options', dest='opts',
         help="comma separated list of options: foreground, debug, allowother")
-    parser.add_argument('--cachesize', help="zip files cache size", default=1000)
+    parser.add_argument('--cachesize', help="zip files cache size", type=int, default=1000)
     arg = parser.parse_args()
 
     CachedZipFactory.MAX_CACHE_SIZE = arg.cachesize
