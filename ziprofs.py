@@ -18,80 +18,32 @@ from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
 from collections import OrderedDict
 
 
-class CachedZipFile(object):
-    MAX_SEEK_READ = 1 << 24
-
-    def __init__(self, path):
-        self.cache = {}
-        self.zf = zipfile.ZipFile(path)
-
-    def read(self, subpath, size, offset):
-        if subpath not in self.cache:
-            self.cache[subpath] = (0, self.zf.open(subpath))
-        pos, f = self.cache[subpath]
-        if f.seekable():
-            pos = f.seek(offset)
-            buf = f.read(size)
-        else:
-            if offset < pos:
-                pos = 0
-                f.close()
-                f = self.zf.open(subpath)
-            else:
-                offset -= pos
-            while offset > 0:
-                read_len = min(self.MAX_SEEK_READ, offset)
-                buf = f.read(read_len)
-                pos += len(buf)
-                offset -= read_len
-            buf = f.read(size)
-
-        pos += len(buf)
-        self.cache[subpath] = (pos, f)
-        return buf
-
-    def close(self):
-        for k, v in self.cache.items():
-            v[1].close()
-        self.zf.close()
-
-    # pass through methods
-    def getinfo(self, subpath):
-        return self.zf.getinfo(subpath)
-
-    def infolist(self):
-        return self.zf.infolist()
-
-
 class CachedZipFactory(object):
     MAX_CACHE_SIZE=1000
     cache = OrderedDict()
     log = logging.getLogger('ziprofs.cache')
-    rwlock = Lock()
 
-    def _cleanup(self, zf: CachedZipFile):
+    def _cleanup(self, zf: object):
         zf.close()
         del zf
 
     def _add(self, path: str):
         if path in self.cache:
             return
-        with self.rwlock:
-            if len(self.cache) == self.MAX_CACHE_SIZE:
-                oldkey, oldvalue = self.cache.popitem(last=False)
-                self.log.debug('Popping cache entry: %s', oldkey)
-                self._cleanup(oldvalue[1])
-            mtime = os.lstat(path).st_mtime
-            self.log.debug("Caching path (%s:%s)", path, mtime)
-            self.cache[path] = (mtime, CachedZipFile(path))
+        if len(self.cache) == self.MAX_CACHE_SIZE:
+            oldkey, oldvalue = self.cache.popitem(last=False)
+            self.log.debug('Popping cache entry: %s', oldkey)
+            self._cleanup(oldvalue[1])
+        mtime = os.lstat(path).st_mtime
+        self.log.debug("Caching path (%s:%s)", path, mtime)
+        self.cache[path] = (mtime, zipfile.ZipFile(path))
 
     def get(self, path: str) -> object:
         if path in self.cache:
             self.cache.move_to_end(path)
             mtime = os.lstat(path).st_mtime
             if mtime > self.cache[path][0]:
-                with self.rwlock:
-                    oldvalue = self.cache.pop(path)
+                oldvalue = self.cache.pop(path)
                 self._cleanup(oldvalue[1])
                 self._add(path)
         else:
@@ -100,6 +52,7 @@ class CachedZipFactory(object):
 
 
 class ZipROFS(LoggingMixIn, Operations):
+    MAX_SEEK_READ = 1 << 24
     zip_factory = CachedZipFactory()
 
     def __init__(self, root):
@@ -174,7 +127,17 @@ class ZipROFS(LoggingMixIn, Operations):
                 return os.read(fh, size)
             zf = self.zip_factory.get(zip_path)
             subpath = path[len(zip_path)+1:]
-            return zf.read(subpath, size, offset)
+            with zf.open(subpath) as f:
+                if f.seekable():
+                    f.seek(offset)
+                    return f.read(size)
+                else:
+                    # emulate seek by reading and skipping 1mb chunks
+                    while offset > 0:
+                        read_len = min(self.MAX_SEEK_READ, offset)
+                        f.read(read_len)
+                        offset -= read_len
+                    return f.read(size)
 
     def readdir(self, path, fh):
         zip_path = self.get_zip_path(path)
