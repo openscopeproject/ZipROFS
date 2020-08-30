@@ -11,6 +11,7 @@ import logging
 import os
 import zipfile
 import stat
+from threading import RLock
 from typing import Optional, Dict
 
 try:
@@ -23,8 +24,28 @@ from collections import OrderedDict
 
 
 @lru_cache(maxsize=2048)
-def is_zipfile(path):
+def _is_zipfile(path, mtime):
+    # mtime just to miss cache on changed files
     return zipfile.is_zipfile(path)
+
+
+def is_zipfile(path):
+    return _is_zipfile(path, os.lstat(path).st_mtime)
+
+
+class ZipFile(zipfile.ZipFile):
+    def __init__(self, *args, **kwargs):
+        super(ZipFile, self).__init__(*args, **kwargs)
+        self.__lock = RLock()
+
+    def lock(self):
+        return self.__lock
+
+    def open(self, *args, **kwargs):
+        zef = super(ZipFile, self).open(*args, **kwargs)
+        zef.ziplock = lambda: self.__lock
+        return zef
+        # yes, I know.. not the best way ;X
 
 
 class CachedZipFactory(object):
@@ -32,28 +53,33 @@ class CachedZipFactory(object):
     cache = OrderedDict()
     log = logging.getLogger('ziprofs.cache')
 
-    def _add(self, path: str):
-        if path in self.cache:
-            return
-        while len(self.cache) >= self.MAX_CACHE_SIZE:
-            path, val = self.cache.popitem(last=False)
-            self.log.debug('Popping cache entry: %s', path)
-            val[1].close()
-        mtime = os.lstat(path).st_mtime
-        self.log.debug("Caching path (%s:%s)", path, mtime)
-        self.cache[path] = (mtime, zipfile.ZipFile(path))
+    def __init__(self):
+        self.__lock = RLock()
 
-    def get(self, path: str) -> zipfile.ZipFile:
-        if path in self.cache:
-            self.cache.move_to_end(path)
-            mtime = os.lstat(path).st_mtime
-            if mtime > self.cache[path][0]:
-                val = self.cache.pop(path)
+    def _add(self, path: str):
+        with self.__lock:
+            if path in self.cache:
+                return
+            while len(self.cache) >= self.MAX_CACHE_SIZE:
+                path, val = self.cache.popitem(last=False)
+                self.log.debug('Popping cache entry: %s', path)
                 val[1].close()
+            mtime = os.lstat(path).st_mtime
+            self.log.debug("Caching path (%s:%s)", path, mtime)
+            self.cache[path] = (mtime, ZipFile(path))
+
+    def get(self, path: str) -> ZipFile:
+        with self.__lock:
+            if path in self.cache:
+                self.cache.move_to_end(path)
+                mtime = os.lstat(path).st_mtime
+                if mtime > self.cache[path][0]:
+                    val = self.cache.pop(path)
+                    val[1].close()
+                    self._add(path)
+            else:
                 self._add(path)
-        else:
-            self._add(path)
-        return self.cache[path][1]
+            return self.cache[path][1]
 
 
 class ZipROFS(LoggingMixIn, Operations):
@@ -64,6 +90,7 @@ class ZipROFS(LoggingMixIn, Operations):
         self.root = realpath(root)
         # odd file handles are files inside zip, even fhs are system-wide files - collision avoidance
         self._zip_file_fh: Dict[int, zipfile.ZipExtFile] = {}
+        self._lock = RLock()
 
     def __call__(self, op, path, *args):
         return super(ZipROFS, self).__call__(op, self.root + path, *args)
@@ -129,19 +156,20 @@ class ZipROFS(LoggingMixIn, Operations):
         return result
 
     def open(self, path, flags):
-        if zip_path := self.get_zip_path(path):
-            fh = self._get_free_zip_fh()
-            zf = self.zip_factory.get(zip_path)
-            self._zip_file_fh[fh] = zf.open(path[len(zip_path) + 1:])
-            return fh
+        zip_path = self.get_zip_path(path)
+        if zip_path:
+            with self._lock:
+                fh = self._get_free_zip_fh()
+                zf = self.zip_factory.get(zip_path)
+                self._zip_file_fh[fh] = zf.open(path[len(zip_path) + 1:])
+                return fh
         else:
             return os.open(path, flags) << 1
 
     def read(self, path, size, offset, fh):
         if self.get_zip_path(path):
             f = self._zip_file_fh[fh]  # should be here (file is first opened, then read)
-            # ZipExtFile._fileobj is always _SharedFile, which has common lock with ZipFile instance
-            with self._zip_file_fh[fh]._fileobj._lock:
+            with f.ziplock():
                 if f.seekable():
                     if self.log.isEnabledFor(logging.DEBUG):
                         foffset = f.tell()
@@ -150,19 +178,27 @@ class ZipROFS(LoggingMixIn, Operations):
                     return f.read(size)
                 else:
                     # emulate seek by reading and discarding chunks
-                    filepos = f._orig_file_size - f._left - len(f._readbuffer) + f._offset      # zipfile.py#1110 - tell()
+                    # zipfile.py#1110 - tell()
+                    # TODO: remove usage of hidden fields
+                    filepos = f._orig_file_size - f._left - len(f._readbuffer) + f._offset
                     offset -= filepos
                     if offset < 0:
-                        raise FuseOSError(errno.ENOTSUP)
+                        # cant seek back in non-seekable file
+                        raise FuseOSError(errno.EINVAL)
                     while offset > 0:
-                        offset -= len(f.read(min(self.MAX_SEEK_READ, offset)))
+                        data = len(f.read(min(self.MAX_SEEK_READ, offset)))
+                        if not data:
+                            # reached end of file - offset is beyond file
+                            raise FuseOSError(errno.EINVAL)
+                        offset -= data
                     return f.read(size)
         else:
             os.lseek(fh >> 1, offset, 0)
             return os.read(fh >> 1, size)
 
     def readdir(self, path, fh):
-        if not (zip_path := self.get_zip_path(path)):
+        zip_path = self.get_zip_path(path)
+        if not zip_path:
             return ['.', '..'] + os.listdir(path)
         subpath = path[len(zip_path)+1:]
         zf = self.zip_factory.get(zip_path)
@@ -185,7 +221,7 @@ class ZipROFS(LoggingMixIn, Operations):
     def release(self, path, fh):
         if self.get_zip_path(path):
             f = self._zip_file_fh[fh]
-            with self._zip_file_fh[fh]._fileobj._lock:
+            with f.ziplock():
                 del self._zip_file_fh[fh]
                 return f.close()
         else:
