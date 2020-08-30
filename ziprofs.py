@@ -163,9 +163,6 @@ class ZipROFS(LoggingMixIn, Operations):
                 if not f.seekable():
                     raise FuseOSError(errno.EBADF)
 
-                if self.log.isEnabledFor(logging.DEBUG):
-                    foffset = f.tell()
-                    self.log.debug(f" file offset: {foffset}, read offset: {offset}, diff: {offset-foffset}")
                 f.seek(offset)
                 return f.read(size)
         else:
@@ -237,7 +234,10 @@ if __name__ == '__main__':
     arg = parser.parse_args()
 
     if 'cachesize' in arg.opts:
-        CachedZipFactory.MAX_CACHE_SIZE = int(arg.opts['cachesize'])
+        cache_size = int(arg.opts['cachesize'])
+        if cache_size < 2:
+            raise ValueError("Bad cache size")
+        CachedZipFactory.MAX_CACHE_SIZE = cache_size
 
     logging.basicConfig(level=logging.DEBUG if 'debug' in arg.opts else logging.INFO)
 
