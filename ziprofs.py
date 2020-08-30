@@ -9,6 +9,7 @@ import argparse
 import errno
 import logging
 import os
+import time
 import zipfile
 import stat
 from threading import RLock
@@ -120,7 +121,6 @@ class ZipROFS(LoggingMixIn, Operations):
         result = {key: getattr(st, key) for key in (
             'st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'
         )}
-        # TODO: read file creation time from zip
         if zip_path == path:
             result['st_mode'] = S_IFDIR | (result['st_mode'] & 0o555)
         elif zip_path:
@@ -128,6 +128,11 @@ class ZipROFS(LoggingMixIn, Operations):
             subpath = path[len(zip_path)+1:]
             try:
                 info = zf.getinfo(subpath)
+                try:
+                    mtime = time.mktime(info.date_time + (0, 0, -1))
+                    result['st_mtime'] = mtime
+                except Exception:
+                    pass
                 result['st_size'] = info.file_size
                 result['st_mode'] = stat.S_IFREG | 0o555
             except KeyError:
