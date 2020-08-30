@@ -15,14 +15,17 @@ from threading import RLock
 from typing import Optional, Dict
 
 try:
+    # noinspection PyPackageRequirements
     from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
 except ImportError:
     # ubuntu renamed package in repository
+    # noinspection PyUnresolvedReferences
     from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
 
 from collections import OrderedDict
 
 
+# noinspection PyUnusedLocal
 @lru_cache(maxsize=2048)
 def _is_zipfile(path, mtime):
     # mtime just to miss cache on changed files
@@ -35,7 +38,7 @@ def is_zipfile(path):
 
 class ZipFile(zipfile.ZipFile):
     def __init__(self, *args, **kwargs):
-        super(ZipFile, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.__lock = RLock()
 
     def lock(self):
@@ -88,7 +91,7 @@ class ZipROFS(LoggingMixIn, Operations):
 
     def __init__(self, root):
         self.root = realpath(root)
-        # odd file handles are files inside zip, even fhs are system-wide files - collision avoidance
+        # odd file handles are files inside zip, even fhs are system-wide files
         self._zip_file_fh: Dict[int, zipfile.ZipExtFile] = {}
         self._lock = RLock()
 
@@ -97,10 +100,9 @@ class ZipROFS(LoggingMixIn, Operations):
 
     def _get_free_zip_fh(self):
         i = 5   # avoid confusion with stdin/err/out
-        while True:
-            if i not in self._zip_file_fh:
-                return i
+        while i in self._zip_file_fh:
             i += 2
+        return i
 
     @staticmethod
     def get_zip_path(path: str) -> Optional[str]:
@@ -161,13 +163,14 @@ class ZipROFS(LoggingMixIn, Operations):
             with self._lock:
                 fh = self._get_free_zip_fh()
                 zf = self.zip_factory.get(zip_path)
+                # noinspection PyTypeChecker
                 self._zip_file_fh[fh] = zf.open(path[len(zip_path) + 1:])
                 return fh
         else:
             return os.open(path, flags) << 1
 
     def read(self, path, size, offset, fh):
-        if self.get_zip_path(path):
+        if fh in self._zip_file_fh:
             f = self._zip_file_fh[fh]  # should be here (file is first opened, then read)
             with f.ziplock():
                 if f.seekable():
@@ -189,7 +192,7 @@ class ZipROFS(LoggingMixIn, Operations):
                         data = len(f.read(min(self.MAX_SEEK_READ, offset)))
                         if not data:
                             # reached end of file - offset is beyond file
-                            raise FuseOSError(errno.EINVAL)
+                            return b''
                         offset -= data
                     return f.read(size)
         else:
@@ -219,7 +222,7 @@ class ZipROFS(LoggingMixIn, Operations):
         return result
 
     def release(self, path, fh):
-        if self.get_zip_path(path):
+        if fh in self._zip_file_fh:
             f = self._zip_file_fh[fh]
             with f.ziplock():
                 del self._zip_file_fh[fh]
