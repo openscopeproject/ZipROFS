@@ -4,3 +4,4 @@ test/mnt/*
 objectdb
 venv/
 .idea/
+log.txt
