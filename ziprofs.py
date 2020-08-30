@@ -45,10 +45,34 @@ class ZipFile(zipfile.ZipFile):
         return self.__lock
 
     def open(self, *args, **kwargs):
-        zef = super(ZipFile, self).open(*args, **kwargs)
-        zef.ziplock = lambda: self.__lock
-        return zef
-        # yes, I know.. not the best way ;X
+        return ZipExtFile(self, super().open(*args, **kwargs))
+
+
+class ZipExtFile(zipfile.ZipExtFile):
+    def __init__(self, zipfile, zipextfile):
+        self._zipextfile = zipextfile
+        self._zipfile = zipfile
+        self._read = 0
+
+    def __getattribute__(self, item):
+        if item in ['_zipextfile', '_zipfile', '_read', 'read', 'tell', 'ziplock']:
+            return super().__getattribute__(item)
+        else:
+            return self._zipextfile.__getattribute__(item)
+
+    def ziplock(self):
+        return self._zipfile.lock()
+
+    def tell(self):
+        if self.seekable():
+            return self._zipextfile.tell()
+        else:
+            return self._read
+
+    def read(self, n=-1):
+        ret = self._zipextfile.read(n)
+        self._read += len(ret)
+        return ret
 
 
 class CachedZipFactory(object):
@@ -92,7 +116,7 @@ class ZipROFS(LoggingMixIn, Operations):
     def __init__(self, root):
         self.root = realpath(root)
         # odd file handles are files inside zip, even fhs are system-wide files
-        self._zip_file_fh: Dict[int, zipfile.ZipExtFile] = {}
+        self._zip_file_fh: Dict[int, ZipExtFile] = {}
         self._lock = RLock()
 
     def __call__(self, op, path, *args):
@@ -181,10 +205,7 @@ class ZipROFS(LoggingMixIn, Operations):
                     return f.read(size)
                 else:
                     # emulate seek by reading and discarding chunks
-                    # zipfile.py#1110 - tell()
-                    # TODO: remove usage of hidden fields
-                    filepos = f._orig_file_size - f._left - len(f._readbuffer) + f._offset
-                    offset -= filepos
+                    offset -= f.tell()
                     if offset < 0:
                         # cant seek back in non-seekable file
                         raise FuseOSError(errno.EINVAL)
