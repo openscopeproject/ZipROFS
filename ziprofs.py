@@ -126,27 +126,35 @@ class ZipROFS(LoggingMixIn, Operations):
         elif zip_path:
             zf = self.zip_factory.get(zip_path)
             subpath = path[len(zip_path)+1:]
+            info = None
             try:
                 info = zf.getinfo(subpath)
+                result['st_size'] = info.file_size
+                result['st_mode'] = stat.S_IFREG | 0o555
+            except KeyError:
+                # check if it is a valid subdirectory
+                try:
+                    info = zf.getinfo(subpath + '/')
+                except KeyError:
+                    pass
+                found = False
+                if not info:
+                    infolist = zf.infolist()
+                    for info in infolist:
+                        if info.filename.find(subpath + '/') == 0:
+                            found = True
+                            break
+                if found or info:
+                    result['st_mode'] = S_IFDIR | 0o555
+                else:
+                    raise FuseOSError(errno.ENOENT)
+            if info:
+                # update mtime
                 try:
                     mtime = time.mktime(info.date_time + (0, 0, -1))
                     result['st_mtime'] = mtime
                 except Exception:
                     pass
-                result['st_size'] = info.file_size
-                result['st_mode'] = stat.S_IFREG | 0o555
-            except KeyError:
-                # check if it is a valid subdirectory
-                infolist = zf.infolist()
-                found = False
-                for info in infolist:
-                    if info.filename.find(subpath + '/') == 0:
-                        found = True
-                        break
-                if found:
-                    result['st_mode'] = S_IFDIR | 0o555
-                else:
-                    raise FuseOSError(errno.ENOENT)
         return result
 
     def open(self, path, flags):
