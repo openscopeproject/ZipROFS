@@ -51,8 +51,8 @@ class CachedZipFactory(object):
         if path in self.cache:
             return
         while len(self.cache) >= self.MAX_CACHE_SIZE:
-            path, val = self.cache.popitem(last=False)
-            self.log.debug('Popping cache entry: %s', path)
+            oldpath, val = self.cache.popitem(last=False)
+            self.log.debug('Popping cache entry: %s', oldpath)
             val[1].close()
         mtime = os.lstat(path).st_mtime
         self.log.debug("Caching path (%s:%s)", path, mtime)
