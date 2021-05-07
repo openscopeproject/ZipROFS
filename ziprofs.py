@@ -81,6 +81,7 @@ class ZipROFS(LoggingMixIn, Operations):
         # odd file handles are files inside zip, even fhs are system-wide files
         self._zip_file_fh: Dict[int, zipfile.ZipExtFile] = {}
         self._zip_zfile_fh: Dict[int, ZipFile] = {}
+        self._fh_locks: Dict[int, RLock] = {}
         self._lock = RLock()
 
     def __call__(self, op, path, *args):
@@ -167,7 +168,9 @@ class ZipROFS(LoggingMixIn, Operations):
                 self._zip_file_fh[fh] = zf.open(path[len(zip_path) + 1:])
                 return fh
         else:
-            return os.open(path, flags) << 1
+            fh = os.open(path, flags) << 1
+            self._fh_locks[fh] = RLock()
+            return fh
 
     def read(self, path, size, offset, fh):
         if fh in self._zip_file_fh:
@@ -179,8 +182,9 @@ class ZipROFS(LoggingMixIn, Operations):
                 f.seek(offset)
                 return f.read(size)
         else:
-            os.lseek(fh >> 1, offset, 0)
-            return os.read(fh >> 1, size)
+            with self._fh_locks[fh]:
+                os.lseek(fh >> 1, offset, 0)
+                return os.read(fh >> 1, size)
 
     def readdir(self, path, fh):
         zip_path = self.get_zip_path(path)
@@ -213,7 +217,9 @@ class ZipROFS(LoggingMixIn, Operations):
                     del self._zip_zfile_fh[fh]
                     return f.close()
         else:
-            return os.close(fh >> 1)
+            with self._fh_locks[fh]:
+                del self._fh_locks[fh]
+                return os.close(fh >> 1)
 
     def statfs(self, path):
         stv = os.statvfs(path)
