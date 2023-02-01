@@ -6,6 +6,7 @@ from functools import lru_cache
 from os.path import realpath
 
 import argparse
+import ctypes
 import errno
 import logging
 import os
@@ -16,10 +17,12 @@ from threading import RLock
 from typing import Optional, Dict
 
 try:
-    from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+    from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR, fuse_operations
+    import fuse as fusepy
 except ImportError:
     # ubuntu renamed package in repository
-    from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR
+    from fusepy import FUSE, FuseOSError, Operations, LoggingMixIn, S_IFDIR, fuse_operations
+    import fusepy
 
 from collections import OrderedDict
 
@@ -104,7 +107,8 @@ class ZipROFS(LoggingMixIn, Operations):
         cur_path = '/'
         for part in parts:
             cur_path = os.path.join(cur_path, part)
-            if part[-4:] == '.zip' and is_zipfile(cur_path, os.lstat(cur_path).st_mtime):
+            if part[-4:] == '.zip' and is_zipfile(cur_path,
+                                                  os.lstat(cur_path).st_mtime):
                 return cur_path
         return None
 
@@ -126,7 +130,7 @@ class ZipROFS(LoggingMixIn, Operations):
             result['st_mode'] = S_IFDIR | (result['st_mode'] & 0o555)
         elif zip_path:
             zf = self.zip_factory.get(zip_path)
-            subpath = path[len(zip_path)+1:]
+            subpath = path[len(zip_path) + 1:]
             info = None
             try:
                 info = zf.getinfo(subpath)
@@ -174,7 +178,8 @@ class ZipROFS(LoggingMixIn, Operations):
 
     def read(self, path, size, offset, fh):
         if fh in self._zip_file_fh:
-            f = self._zip_file_fh[fh]  # should be here (file is first opened, then read)
+            # should be here (file is first opened, then read)
+            f = self._zip_file_fh[fh]
             with self._zip_zfile_fh[fh].lock():
                 if not f.seekable():
                     raise FuseOSError(errno.EBADF)
@@ -190,7 +195,7 @@ class ZipROFS(LoggingMixIn, Operations):
         zip_path = self.get_zip_path(path)
         if not zip_path:
             return ['.', '..'] + os.listdir(path)
-        subpath = path[len(zip_path)+1:]
+        subpath = path[len(zip_path) + 1:]
         zf = self.zip_factory.get(zip_path)
         infolist = zf.infolist()
 
@@ -198,7 +203,7 @@ class ZipROFS(LoggingMixIn, Operations):
         subdirs = set()
         for info in infolist:
             if info.filename.find(subpath) == 0 and info.filename > subpath:
-                suffix = info.filename[len(subpath)+1 if subpath else 0:]
+                suffix = info.filename[len(subpath) + 1 if subpath else 0:]
                 if not suffix:
                     continue
                 if '/' not in suffix:
@@ -229,6 +234,43 @@ class ZipROFS(LoggingMixIn, Operations):
         ))
 
 
+class fuse_conn_info(ctypes.Structure):
+    _fields_ = [
+        ('proto_major', ctypes.c_uint),
+        ('proto_minor', ctypes.c_uint),
+        ('async_read', ctypes.c_uint),
+        ('max_write', ctypes.c_uint),
+        ('max_readahead', ctypes.c_uint),
+        ('capable', ctypes.c_uint),
+        ('want', ctypes.c_uint),
+        ('reserved', ctypes.c_uint, 25)]
+
+
+class ZipROFuse(FUSE):
+    def __init__(self, operations, mountpoint, **kwargs):
+        self.support_async = kwargs.get('support_async', False)
+        del kwargs['support_async']
+        if not self.support_async:
+            # monkeypatch fuse_operations
+            ops = fuse_operations._fields_
+            for i in range(len(ops)):
+                if ops[i][0] == 'init':
+                    ops[i] = (
+                        'init',
+                        ctypes.CFUNCTYPE(
+                            ctypes.c_voidp, ctypes.POINTER(fuse_conn_info))
+                    )
+                fusepy.fuse_operations = type(
+                    'fuse_operations', (ctypes.Structure,), {'_fields_': ops})
+        super().__init__(operations, mountpoint, **kwargs)
+
+    def init(self, conn):
+        if not self.support_async:
+            conn[0].async_read = 0
+            conn[0].want = conn.contents.want & ~1
+        return self.operations('init', '/')
+
+
 def parse_mount_opts(in_str):
     opts = {}
     for o in in_str.split(','):
@@ -245,10 +287,13 @@ if __name__ == '__main__':
         description='ZipROFS read only transparent zip filesystem.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('root', nargs='?', help="filesystem root")
-    parser.add_argument('mountpoint', nargs='?', help="filesystem mount point")
+    parser.add_argument(
+        'mountpoint',
+        nargs='?',
+        help="filesystem mount point")
     parser.add_argument(
         '-o', metavar='options', dest='opts',
-        help="comma separated list of options: foreground, debug, allowother, cachesize=N",
+        help="comma separated list of options: foreground, debug, allowother, async, cachesize=N",
         type=parse_mount_opts, default={})
     arg = parser.parse_args()
 
@@ -258,11 +303,13 @@ if __name__ == '__main__':
             raise ValueError("Bad cache size")
         CachedZipFactory.MAX_CACHE_SIZE = cache_size
 
-    logging.basicConfig(level=logging.DEBUG if 'debug' in arg.opts else logging.INFO)
+    logging.basicConfig(
+        level=logging.DEBUG if 'debug' in arg.opts else logging.INFO)
 
-    fuse = FUSE(
+    fuse = ZipROFuse(
         ZipROFS(arg.root),
         arg.mountpoint,
         foreground=('foreground' in arg.opts),
-        allow_other=('allowother' in arg.opts)
+        allow_other=('allowother' in arg.opts),
+        support_async=('async' in arg.opts)
     )

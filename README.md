@@ -62,5 +62,15 @@ positional arguments:
 
 optional arguments:
   -h, --help  show this help message and exit
-  -o options  comma separated list of options: foreground, debug, allowother, cachesize=N (default: {})
+  -o options  comma separated list of options: foreground, debug, allowother, async, cachesize=N (default: {})
 ```
+
+`foreground` and `allowother` options are passed to FUSE directly.
+
+`debug` option is used to print all syscall details to stdout.
+
+By default ZipROFS disables async reads to improve performance since async syscalls can
+be reordered in fuse which heavily impacts read speeds.
+If async reads are preferable, pass `async` option on mount.
+
+`cachesize` option determines in memory zipfile cache size, defaults to 1000

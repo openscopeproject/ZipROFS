@@ -5,3 +5,4 @@ objectdb
 venv/
 .idea/
 log.txt
+benchmark
