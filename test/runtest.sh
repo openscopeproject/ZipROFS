@@ -47,6 +47,7 @@ runtest "tree" "$TREERESULT" 'tree -a --noreport ./test.zip | tail -n +2'
 
 runtest "reading file content #1" "$(cat ../data/text.txt)" 'cat test.zip/text.txt'
 runtest "reading file content #2" "$(cat ../data/folder/subfolder/file.txt)" 'cat test.zip/folder/subfolder/file.txt'
+runtest "checking non-existant file" "does not exist" "[ -e test.zip/nosuchfile ] || echo 'does not exist'"
 
 runtest "running script" "hello" 'test.zip/script.sh'
 

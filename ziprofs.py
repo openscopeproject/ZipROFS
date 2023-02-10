@@ -145,8 +145,8 @@ class ZipROFS(LoggingMixIn, Operations):
                 found = False
                 if not info:
                     infolist = zf.infolist()
-                    for info in infolist:
-                        if info.filename.find(subpath + '/') == 0:
+                    for f in infolist:
+                        if f.filename.find(subpath + '/') == 0:
                             found = True
                             break
                 if found or info:
