@@ -75,8 +75,7 @@ class CachedZipFactory(object):
             return self.cache[path][1]
 
 
-class ZipROFS(LoggingMixIn, Operations):
-    MAX_SEEK_READ = 1 << 24
+class ZipROFS(Operations):
     zip_factory = CachedZipFactory()
 
     def __init__(self, root):
@@ -88,7 +87,7 @@ class ZipROFS(LoggingMixIn, Operations):
         self._lock = RLock()
 
     def __call__(self, op, path, *args):
-        return super(ZipROFS, self).__call__(op, self.root + path, *args)
+        return super().__call__(op, self.root + path, *args)
 
     def _get_free_zip_fh(self):
         i = 5   # avoid confusion with stdin/err/out
@@ -234,6 +233,11 @@ class ZipROFS(LoggingMixIn, Operations):
         ))
 
 
+class ZipROFSDebug(LoggingMixIn, ZipROFS):
+    def __call__(self, op, path, *args):
+        return super().__call__(op, self.root + path, *args)
+
+
 class fuse_conn_info(ctypes.Structure):
     _fields_ = [
         ('proto_major', ctypes.c_uint),
@@ -306,8 +310,13 @@ if __name__ == '__main__':
     logging.basicConfig(
         level=logging.DEBUG if 'debug' in arg.opts else logging.INFO)
 
+    if 'debug' in arg.opts:
+        fs = ZipROFSDebug(arg.root)
+    else:
+        fs = ZipROFS(arg.root)
+
     fuse = ZipROFuse(
-        ZipROFS(arg.root),
+        fs,
         arg.mountpoint,
         foreground=('foreground' in arg.opts),
         allow_other=('allowother' in arg.opts),
