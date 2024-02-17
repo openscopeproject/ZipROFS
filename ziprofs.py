@@ -78,8 +78,9 @@ class CachedZipFactory(object):
 class ZipROFS(Operations):
     zip_factory = CachedZipFactory()
 
-    def __init__(self, root):
+    def __init__(self, root, zip_check):
         self.root = realpath(root)
+        self.zip_check = zip_check
         # odd file handles are files inside zip, even fhs are system-wide files
         self._zip_file_fh: Dict[int, zipfile.ZipExtFile] = {}
         self._zip_zfile_fh: Dict[int, ZipFile] = {}
@@ -95,8 +96,7 @@ class ZipROFS(Operations):
             i += 2
         return i
 
-    @staticmethod
-    def get_zip_path(path: str) -> Optional[str]:
+    def get_zip_path(self, path: str) -> Optional[str]:
         parts = []
         head, tail = os.path.split(path)
         while tail:
@@ -106,8 +106,8 @@ class ZipROFS(Operations):
         cur_path = '/'
         for part in parts:
             cur_path = os.path.join(cur_path, part)
-            if part[-4:] == '.zip' and is_zipfile(cur_path,
-                                                  os.lstat(cur_path).st_mtime):
+            if part[-4:] == '.zip' and (
+                    not self.zip_check or is_zipfile(cur_path, os.lstat(cur_path).st_mtime)):
                 return cur_path
         return None
 
@@ -297,7 +297,8 @@ if __name__ == '__main__':
         help="filesystem mount point")
     parser.add_argument(
         '-o', metavar='options', dest='opts',
-        help="comma separated list of options: foreground, debug, allowother, async, cachesize=N",
+        help="comma separated list of options: foreground, debug, allowother, "
+        "nozipcheck, async, cachesize=N",
         type=parse_mount_opts, default={})
     arg = parser.parse_args()
 
@@ -310,10 +311,12 @@ if __name__ == '__main__':
     logging.basicConfig(
         level=logging.DEBUG if 'debug' in arg.opts else logging.INFO)
 
+    zip_check = 'nozipcheck' not in arg.opts
+
     if 'debug' in arg.opts:
-        fs = ZipROFSDebug(arg.root)
+        fs = ZipROFSDebug(arg.root, zip_check)
     else:
-        fs = ZipROFS(arg.root)
+        fs = ZipROFS(arg.root, zip_check)
 
     fuse = ZipROFuse(
         fs,
